@@ -10,10 +10,12 @@ A lightweight, TreeSize-style disk space analyser for Windows built with Python 
 - **Sorted by size** — largest items always appear first at every level
 - **Drill down** — click the expand arrow on any folder to reveal its contents
 - **Double-click** a folder to re-scan it as the new root
-- **Size bar** — visual block-chart showing relative size among siblings
+- **Green size bars** — proportional bars drawn inline in the tree, colour-coded by type
+- **Live updates** — the app watches the scanned folder in real time using `ReadDirectoryChangesW`; deletions, additions, renames, and size changes are reflected automatically within ~250 ms
+- **Delete from the app** — right-click any item and choose **Delete…** to permanently remove it (with confirmation); the tree updates instantly
 - **Live progress** — background scanning with a folder counter and cancel button
-- **Right-click menu** — open a folder in Explorer or re-scan it directly
-- **Status bar** — total size, folder count, and file count after each scan
+- **Right-click menu** — open in Explorer, re-scan, or delete
+- **Status bar** — total size, folder count, file count, and live-watch indicator after each scan
 
 ## Requirements
 
@@ -30,11 +32,12 @@ python disksizer.py
 
 ## Usage
 
-1. Click **Browse…** to pick a folder, or type a path directly into the box (e.g. `C:\Users\YourName`) and press **Enter** or **Scan**
+1. Click **Browse…** to pick a folder, or type a path directly (e.g. `C:\Users\YourName`) and press **Enter** or **Scan**
 2. Wait for the scan to finish — progress is shown in the toolbar
-3. Click the **▶** arrow next to any folder to expand it
-4. **Double-click** a folder to zoom in and rescan from there
-5. **Right-click** any item for additional options
+3. Click the **▶** arrow next to any folder to expand it and see its contents
+4. **Double-click** a folder to zoom in and re-scan from there
+5. **Right-click** any item for additional options (Explorer, re-scan, delete)
+6. Changes made in Explorer are reflected automatically — no need to re-scan
 
 ## License
 
