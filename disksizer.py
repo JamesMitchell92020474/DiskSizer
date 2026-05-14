@@ -23,21 +23,10 @@ def fmt_size(n: int) -> str:
     return f"{n / 1_099_511_627_776:.2f} TB"
 
 
-def size_bar(size: int, max_size: int, width: int = 20) -> str:
-    if max_size <= 0:
-        return ""
-    filled = round(size / max_size * width)
-    return "█" * filled + "░" * (width - filled)
-
-
 # ── Scanner ───────────────────────────────────────────────────────────────────
 
 class Scanner:
-    """Walk a directory tree recursively, accumulating per-folder sizes."""
-
     def __init__(self, progress_cb=None):
-        # path -> (total_bytes, sorted_children)
-        # child tuple: ('file'|'dir', name, abspath, size)
         self.data: dict[str, tuple[int, list]] = {}
         self.cancelled = False
         self._progress_cb = progress_cb
@@ -52,10 +41,8 @@ class Scanner:
     def _visit(self, path: str) -> int:
         if self.cancelled:
             return 0
-
         total = 0
         entries: list = []
-
         try:
             with os.scandir(path) as it:
                 for e in it:
@@ -76,20 +63,20 @@ class Scanner:
                         pass
         except OSError:
             pass
-
         entries.sort(key=lambda x: x[3], reverse=True)
         self.data[path] = (total, entries)
-
         self._folder_count += 1
         if self._progress_cb and self._folder_count % 100 == 0:
             self._progress_cb(self._folder_count, path)
-
         return total
 
 
 # ── Application ───────────────────────────────────────────────────────────────
 
 _PLACEHOLDER_TAG = "placeholder"
+_COL_FOLDER = "#3a9e4f"   # dark green for folders
+_COL_FILE   = "#71c883"   # lighter green for files
+_COL_BAR_BG = "#f0faf2"   # canvas background
 
 
 class DiskSizer:
@@ -102,6 +89,7 @@ class DiskSizer:
         self._scanner: Scanner | None = None
         self._scan_thread: threading.Thread | None = None
         self._node_to_path: dict[str, str] = {}
+        self._redraw_id: str | None = None
 
         self._build_ui()
         self.win.mainloop()
@@ -112,7 +100,7 @@ class DiskSizer:
         self.win.columnconfigure(0, weight=1)
         self.win.rowconfigure(2, weight=1)
 
-        # Row 0 — toolbar
+        # Toolbar
         toolbar = tk.Frame(self.win, bg="#e8e8e8", pady=6, padx=8)
         toolbar.grid(row=0, column=0, sticky="ew")
 
@@ -120,8 +108,7 @@ class DiskSizer:
                   command=self._browse, padx=6).pack(side=tk.LEFT)
 
         self._path_var = tk.StringVar()
-        path_entry = tk.Entry(toolbar, textvariable=self._path_var,
-                              font=("Segoe UI", 9))
+        path_entry = tk.Entry(toolbar, textvariable=self._path_var, font=("Segoe UI", 9))
         path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 4))
         path_entry.bind("<Return>", lambda _: self._start_scan(self._path_var.get()))
 
@@ -129,7 +116,7 @@ class DiskSizer:
                                    command=self._on_scan_click, padx=10)
         self._scan_btn.pack(side=tk.LEFT)
 
-        # Row 1 — progress strip (hidden until scanning)
+        # Progress strip (hidden until scan starts)
         self._prog_frame = tk.Frame(self.win, bg="#e8e8e8", pady=3, padx=8)
         self._pbar = ttk.Progressbar(self._prog_frame, mode="indeterminate", length=260)
         self._pbar.pack(side=tk.LEFT)
@@ -137,43 +124,56 @@ class DiskSizer:
                                   font=("Segoe UI", 8), fg="#555")
         self._prog_lbl.pack(side=tk.LEFT, padx=6)
 
-        # Row 2 — tree
+        # Tree frame
         tree_frame = tk.Frame(self.win)
-        tree_frame.grid(row=2, column=0, sticky="nsew", padx=6, pady=(3, 3))
+        tree_frame.grid(row=2, column=0, sticky="nsew", padx=6, pady=3)
         tree_frame.columnconfigure(0, weight=1)
         tree_frame.rowconfigure(0, weight=1)
 
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical")
+        self._vsb = ttk.Scrollbar(tree_frame, orient="vertical")
         hsb = ttk.Scrollbar(tree_frame, orient="horizontal")
 
         self._tree = ttk.Treeview(
             tree_frame,
-            columns=("size", "raw_bytes", "bar", "kind"),
-            yscrollcommand=vsb.set,
+            columns=("size", "raw_bytes", "frac", "kind"),
+            yscrollcommand=self._on_tree_yscroll,
             xscrollcommand=hsb.set,
             selectmode="browse",
         )
-        vsb.config(command=self._tree.yview)
+        self._vsb.config(command=self._tree.yview)
         hsb.config(command=self._tree.xview)
 
+        # Green bar canvas — sits between tree and scrollbar
+        self._bar_canvas = tk.Canvas(
+            tree_frame, width=165, bg=_COL_BAR_BG,
+            highlightthickness=1, highlightbackground="#c8c8c8", bd=0,
+        )
+
         self._tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
+        self._bar_canvas.grid(row=0, column=1, sticky="ns", padx=(3, 0))
+        self._vsb.grid(row=0, column=2, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
 
-        self._tree.heading("#0",        text="Name",  anchor="w")
-        self._tree.heading("size",      text="Size",  anchor="e")
-        self._tree.heading("raw_bytes", text="",      anchor="w")
-        self._tree.heading("bar",       text="",      anchor="w")
-        self._tree.heading("kind",      text="Type",  anchor="w")
+        self._tree.heading("#0",        text="Name", anchor="w")
+        self._tree.heading("size",      text="Size", anchor="e")
+        self._tree.heading("raw_bytes", text="",     anchor="w")
+        self._tree.heading("frac",      text="",     anchor="w")
+        self._tree.heading("kind",      text="Type", anchor="w")
 
         self._tree.column("#0",        width=380, minwidth=160, stretch=True)
         self._tree.column("size",      width=90,  anchor="e",  stretch=False)
         self._tree.column("raw_bytes", width=0,               stretch=False)
-        self._tree.column("bar",       width=170, anchor="w",  stretch=False, minwidth=60)
+        self._tree.column("frac",      width=0,               stretch=False)
         self._tree.column("kind",      width=65,  anchor="w",  stretch=False)
 
         self._tree.bind("<<TreeviewOpen>>", self._on_expand)
         self._tree.bind("<Double-1>",        self._on_double_click)
+
+        # Mousewheel over the bar canvas scrolls the tree
+        self._bar_canvas.bind("<MouseWheel>", lambda e: self._tree.yview_scroll(
+            int(-1 * (e.delta / 120)), "units"
+        ))
+        self._bar_canvas.bind("<Configure>", lambda _: self._schedule_redraw())
 
         ctx = tk.Menu(self.win, tearoff=False)
         ctx.add_command(label="Open in Explorer", command=self._open_in_explorer)
@@ -181,7 +181,6 @@ class DiskSizer:
         self._ctx = ctx
         self._tree.bind("<Button-3>", self._show_ctx_menu)
 
-        # Row 3 — status bar
         self._status = tk.StringVar(value="Select a folder above and press Scan.")
         tk.Label(self.win, textvariable=self._status, anchor="w",
                  relief=tk.SUNKEN, font=("Segoe UI", 8),
@@ -194,6 +193,12 @@ class DiskSizer:
             pass
         s.configure("Treeview", rowheight=22, font=("Segoe UI", 9))
         s.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"))
+
+    # ── Scroll sync ───────────────────────────────────────────────────────────
+
+    def _on_tree_yscroll(self, *args) -> None:
+        self._vsb.set(*args)
+        self._schedule_redraw()
 
     # ── Scan flow ─────────────────────────────────────────────────────────────
 
@@ -220,6 +225,7 @@ class DiskSizer:
 
         self._tree.delete(*self._tree.get_children())
         self._node_to_path.clear()
+        self._bar_canvas.delete("all")
 
         self._prog_frame.grid(row=1, column=0, sticky="ew")
         self._pbar.start(12)
@@ -273,11 +279,12 @@ class DiskSizer:
         root_id = self._tree.insert(
             "", "end",
             text=f"  {name}",
-            values=(fmt_size(total), total, size_bar(total, total), "Folder"),
+            values=(fmt_size(total), total, 1.0, "Folder"),
             open=True,
         )
         self._node_to_path[root_id] = root_path
         self._fill_node(root_id, root_path)
+        self._schedule_redraw()
 
         self._status.set(
             f"Total: {fmt_size(total)}   "
@@ -298,22 +305,22 @@ class DiskSizer:
         max_sz = children[0][3] if children else 1
 
         for kind, name, cpath, size in children:
+            frac = size / max_sz if max_sz > 0 else 0.0
             if kind == "dir":
                 iid = self._tree.insert(
                     parent_id, "end",
                     text=f"  {name}",
-                    values=(fmt_size(size), size, size_bar(size, max_sz), "Folder"),
+                    values=(fmt_size(size), size, frac, "Folder"),
                 )
                 self._node_to_path[iid] = cpath
                 _, sub = data.get(cpath, (0, []))
                 if sub:
-                    self._tree.insert(iid, "end", text="",
-                                      tags=(_PLACEHOLDER_TAG,))
+                    self._tree.insert(iid, "end", text="", tags=(_PLACEHOLDER_TAG,))
             else:
                 self._tree.insert(
                     parent_id, "end",
                     text=f"      {name}",
-                    values=(fmt_size(size), size, size_bar(size, max_sz), "File"),
+                    values=(fmt_size(size), size, frac, "File"),
                 )
 
     def _on_expand(self, _event) -> None:
@@ -326,6 +333,7 @@ class DiskSizer:
             path = self._node_to_path.get(node)
             if path:
                 self._fill_node(node, path)
+                self._schedule_redraw()
 
     def _on_double_click(self, _event) -> None:
         node = self._tree.focus()
@@ -333,6 +341,59 @@ class DiskSizer:
         if path and os.path.isdir(path):
             self._path_var.set(path)
             self._start_scan(path)
+
+    # ── Green bar canvas ──────────────────────────────────────────────────────
+
+    def _schedule_redraw(self) -> None:
+        if self._redraw_id:
+            self.win.after_cancel(self._redraw_id)
+        self._redraw_id = self.win.after(30, self._redraw_bars)
+
+    def _redraw_bars(self) -> None:
+        c = self._bar_canvas
+        c.delete("all")
+        cw = c.winfo_width()
+        if cw <= 1:
+            return
+
+        # Draw a header band matching the Treeview heading style
+        hdr_h = self._heading_height()
+        c.create_rectangle(0, 0, cw, hdr_h, fill="#d9d9d9", outline="#b0b0b0")
+        c.create_text(cw // 2, hdr_h // 2,
+                      text="Size", font=("Segoe UI", 9, "bold"), fill="#333")
+
+        # Draw a green bar for each visible tree row
+        pad = 3
+
+        def walk(node: str) -> None:
+            for item in self._tree.get_children(node):
+                bbox = self._tree.bbox(item)
+                if bbox:
+                    _, iy, _, ih = bbox
+                    try:
+                        frac = float(self._tree.set(item, "frac"))
+                    except (ValueError, tk.TclError):
+                        frac = 0.0
+                    kind = self._tree.set(item, "kind")
+                    color = _COL_FOLDER if kind == "Folder" else _COL_FILE
+                    bw = max(2, int(frac * (cw - pad * 2)))
+                    c.create_rectangle(
+                        pad, iy + pad,
+                        pad + bw, iy + ih - pad,
+                        fill=color, outline="",
+                    )
+                if self._tree.item(item, "open"):
+                    walk(item)
+
+        walk("")
+
+    def _heading_height(self) -> int:
+        """Return the y-offset of the first tree row (= heading bar height)."""
+        for item in self._tree.get_children(""):
+            bbox = self._tree.bbox(item)
+            if bbox:
+                return bbox[1]
+        return 22
 
     # ── Context menu ──────────────────────────────────────────────────────────
 
